@@ -185,117 +185,134 @@ export default function PianoTouchAnalyzer() {
         } catch (e) { /* 재생용 오디오 생성 실패는 분석에 영향 없음 */ }
         finishStream();
       };
-      mediaRecorderRef.current.stop();
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        finishStream();
+      }
     } else {
       finishStream();
     }
 
-    if (audioCtxRef.current) audioCtxRef.current.close();
+    try {
+      if (audioCtxRef.current && audioCtxRef.current.state !== "closed") audioCtxRef.current.close();
+    } catch (e) { /* 이미 닫힌 컨텍스트는 무시 */ }
     setStatus("analyzing");
     setTimeout(() => segment(), 50);
   };
 
   // 녹음에서 음을 분리해 원시 노트 데이터 생성 (기준 악보 없이)
   const segment = () => {
-    const samples = samplesRef.current;
-    if (samples.length < 5) {
-      setErrorMsg("녹음된 데이터가 너무 짧습니다.");
-      setStatus("error");
-      return;
-    }
-    const maxAmp = Math.max(...samples.map((s) => s.amp));
-    if (maxAmp < 0.003) {
-      setErrorMsg("소리가 감지되지 않았습니다. 마이크 위치와 볼륨을 확인해 주세요.");
-      setStatus("error");
-      return;
-    }
-    const onThres = maxAmp * 0.08;
-    const offThres = maxAmp * 0.045;
-    const minGap = 0.11;
-
-    let onsets = [];
-    let sounding = false;
-    let lastOnset = -10;
-    for (const s of samples) {
-      if (!sounding && s.amp > onThres && s.t - lastOnset > minGap) {
-        onsets.push(s.t);
-        lastOnset = s.t;
-        sounding = true;
-      } else if (sounding && s.amp < offThres) {
-        sounding = false;
+    try {
+      const samples = samplesRef.current;
+      if (samples.length < 5) {
+        setErrorMsg("녹음된 데이터가 너무 짧습니다. 다시 녹음해 주세요.");
+        setStatus("error");
+        return;
       }
-    }
-    if (onsets.length === 0) {
-      setErrorMsg("음을 감지하지 못했습니다. 좀 더 또렷하게 연주해 주세요.");
-      setStatus("error");
-      return;
-    }
+      const maxAmp = Math.max(...samples.map((s) => s.amp));
+      if (!isFinite(maxAmp) || maxAmp < 0.003) {
+        setErrorMsg("소리가 감지되지 않았습니다. 마이크 위치와 볼륨을 확인해 주세요.");
+        setStatus("error");
+        return;
+      }
+      const onThres = maxAmp * 0.08;
+      const offThres = maxAmp * 0.045;
+      const minGap = 0.11;
 
-    const totalEnd = samples[samples.length - 1].t;
-    const notes = onsets.map((onsetT, idx) => {
-      const nextOnset = idx + 1 < onsets.length ? onsets[idx + 1] : totalEnd;
-      let offT = nextOnset;
-      let belowSince = null;
+      let onsets = [];
+      let sounding = false;
+      let lastOnset = -10;
       for (const s of samples) {
-        if (s.t <= onsetT) continue;
-        if (s.t >= nextOnset) break;
-        if (s.amp < offThres) {
-          if (belowSince === null) belowSince = s.t;
-          if (s.t - belowSince > 0.08) { offT = belowSince; break; }
-        } else {
-          belowSince = null;
+        if (!sounding && s.amp > onThres && s.t - lastOnset > minGap) {
+          onsets.push(s.t);
+          lastOnset = s.t;
+          sounding = true;
+        } else if (sounding && s.amp < offThres) {
+          sounding = false;
         }
       }
-      const segSamples = samples.filter((s) => s.t >= onsetT + 0.03 && s.t < offT);
-      const validFreqSamples = segSamples.filter((s) => s.freq && s.freq > 0);
-      const freqs = validFreqSamples.map((s) => s.freq).sort((a, b) => a - b);
-      const medianFreq = freqs.length ? freqs[Math.floor(freqs.length / 2)] : null;
-      const peakAmp = Math.max(...samples.filter((s) => s.t >= onsetT && s.t < offT).map((s) => s.amp), 0);
-      const duration = Math.max(offT - onsetT, 0.05);
-
-      let noteInfo = null;
-      let centsSeries = [];
-      if (medianFreq) {
-        const midiMedian = freqToMidi(medianFreq);
-        const midiRounded = Math.round(midiMedian);
-        const { name, octave } = midiToNoteOctave(midiRounded);
-        centsSeries = validFreqSamples.map((s) => (freqToMidi(s.freq) - midiRounded) * 100);
-        const cents = Math.round((midiMedian - midiRounded) * 100);
-        noteInfo = { name, octave, cents };
+      if (onsets.length === 0) {
+        setErrorMsg("음을 감지하지 못했습니다. 좀 더 또렷하게 연주해 주세요.");
+        setStatus("error");
+        return;
       }
-      const jitter = centsSeries.length > 1 ? std(centsSeries, mean(centsSeries)) : (centsSeries.length === 1 ? 0 : null);
-      const confidence = segSamples.length ? validFreqSamples.length / segSamples.length : 0;
 
-      return { onsetT, duration, note: noteInfo, peakAmp, jitter, confidence, sampleCount: validFreqSamples.length };
-    });
+      const totalEnd = samples[samples.length - 1].t;
+      const notes = onsets.map((onsetT, idx) => {
+        const nextOnset = idx + 1 < onsets.length ? onsets[idx + 1] : totalEnd;
+        let offT = nextOnset;
+        let belowSince = null;
+        for (const s of samples) {
+          if (s.t <= onsetT) continue;
+          if (s.t >= nextOnset) break;
+          if (s.amp < offThres) {
+            if (belowSince === null) belowSince = s.t;
+            if (s.t - belowSince > 0.08) { offT = belowSince; break; }
+          } else {
+            belowSince = null;
+          }
+        }
+        const segSamples = samples.filter((s) => s.t >= onsetT + 0.03 && s.t < offT);
+        const validFreqSamples = segSamples.filter((s) => s.freq && s.freq > 0);
+        const freqs = validFreqSamples.map((s) => s.freq).sort((a, b) => a - b);
+        const medianFreq = freqs.length ? freqs[Math.floor(freqs.length / 2)] : null;
+        const ampsInSeg = samples.filter((s) => s.t >= onsetT && s.t < offT).map((s) => s.amp);
+        const peakAmp = ampsInSeg.length ? Math.max(...ampsInSeg) : 0;
+        const duration = Math.max(offT - onsetT, 0.05);
 
-    rawResultsRef.current = notes;
-    analyzeConsistency(notes);
+        let noteInfo = null;
+        let centsSeries = [];
+        if (medianFreq) {
+          const midiMedian = freqToMidi(medianFreq);
+          const midiRounded = Math.round(midiMedian);
+          const { name, octave } = midiToNoteOctave(midiRounded);
+          centsSeries = validFreqSamples.map((s) => (freqToMidi(s.freq) - midiRounded) * 100);
+          const cents = Math.round((midiMedian - midiRounded) * 100);
+          noteInfo = { name, octave, cents };
+        }
+        const jitter = centsSeries.length > 1 ? std(centsSeries, mean(centsSeries)) : (centsSeries.length === 1 ? 0 : null);
+        const confidence = segSamples.length ? validFreqSamples.length / segSamples.length : 0;
+
+        return { onsetT, duration, note: noteInfo, peakAmp, jitter, confidence, sampleCount: validFreqSamples.length };
+      });
+
+      rawResultsRef.current = notes;
+      analyzeConsistency(notes);
+    } catch (e) {
+      setErrorMsg("분석 중 오류가 발생했습니다: " + (e && e.message ? e.message : String(e)));
+      setStatus("error");
+    }
   };
 
   // 연주 전체 통계 대비 개별 터치의 일관성 분석
   const analyzeConsistency = (notes) => {
-    const durs = notes.map((n) => n.duration);
-    const amps = notes.map((n) => n.peakAmp);
-    const meanDur = mean(durs);
-    const meanAmp = mean(amps);
+    try {
+      const durs = notes.map((n) => n.duration);
+      const amps = notes.map((n) => n.peakAmp);
+      const meanDur = mean(durs);
+      const meanAmp = mean(amps);
 
-    const evaluated = notes.map((n) => {
-      const durDevPct = ((n.duration - meanDur) / meanDur) * 100;
-      const volDevPct = ((n.peakAmp - meanAmp) / meanAmp) * 100;
-      const durFlag = Math.abs(durDevPct) > durTolPct;
-      const volFlag = Math.abs(volDevPct) > volTolPct;
-      const shortFlag = n.duration < 0.09;
-      const lowConfidenceFlag = n.confidence < 0.35;
-      const jitterFlag = n.jitter !== null ? n.jitter > jitterTol : true;
-      const ok = !(durFlag || volFlag || shortFlag || lowConfidenceFlag || jitterFlag);
-      return { ...n, durDevPct, volDevPct, durFlag, volFlag, shortFlag, lowConfidenceFlag, jitterFlag, ok };
-    });
+      const evaluated = notes.map((n) => {
+        const durDevPct = ((n.duration - meanDur) / meanDur) * 100;
+        const volDevPct = ((n.peakAmp - meanAmp) / meanAmp) * 100;
+        const durFlag = Math.abs(durDevPct) > durTolPct;
+        const volFlag = Math.abs(volDevPct) > volTolPct;
+        const shortFlag = n.duration < 0.09;
+        const lowConfidenceFlag = n.confidence < 0.35;
+        const jitterFlag = n.jitter !== null ? n.jitter > jitterTol : true;
+        const ok = !(durFlag || volFlag || shortFlag || lowConfidenceFlag || jitterFlag);
+        return { ...n, durDevPct, volDevPct, durFlag, volFlag, shortFlag, lowConfidenceFlag, jitterFlag, ok };
+      });
 
-    const totalDuration = Math.max(...evaluated.map((n) => n.onsetT + n.duration), 0.5);
-    totalDurationRef.current = totalDuration;
-    setResults({ notes: evaluated, meanDur, meanAmp, maxAmp: Math.max(...amps, 0.001), totalDuration });
-    setStatus("done");
+      const totalDuration = Math.max(...evaluated.map((n) => n.onsetT + n.duration), 0.5);
+      totalDurationRef.current = totalDuration;
+      setResults({ notes: evaluated, meanDur, meanAmp, maxAmp: Math.max(...amps, 0.001), totalDuration });
+      setStatus("done");
+    } catch (e) {
+      setErrorMsg("결과를 계산하는 중 오류가 발생했습니다: " + (e && e.message ? e.message : String(e)));
+      setStatus("error");
+    }
   };
 
   // 허용 오차를 바꾸면 이미 녹음된 데이터로 즉시 재평가
