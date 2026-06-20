@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Mic, Square, RotateCcw, ChevronDown, ChevronUp, AlertCircle } from "lucide-react";
+import { Mic, Square, RotateCcw, ChevronDown, ChevronUp, AlertCircle, Play, Pause } from "lucide-react";
 
 // ---------- 음악 이론 유틸 ----------
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -67,6 +67,9 @@ export default function PianoTouchAnalyzer() {
   const [volTolPct, setVolTolPct] = useState(35); // %
   const [elapsed, setElapsed] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playheadRatio, setPlayheadRatio] = useState(0);
 
   const audioCtxRef = useRef(null);
   const streamRef = useRef(null);
@@ -78,10 +81,18 @@ export default function PianoTouchAnalyzer() {
   const canvasMeterRef = useRef(null);
   const timerRef = useRef(null);
   const rawResultsRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const audioElRef = useRef(null);
+  const totalDurationRef = useRef(1);
 
   const startRecording = async () => {
     setErrorMsg("");
     setResults(null);
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    setAudioUrl(null);
+    setIsPlaying(false);
+    setPlayheadRatio(0);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
       streamRef.current = stream;
@@ -92,6 +103,17 @@ export default function PianoTouchAnalyzer() {
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
       source.connect(analyser);
+
+      // 재생용 오디오 녹음
+      chunksRef.current = [];
+      try {
+        const mr = new MediaRecorder(stream);
+        mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+        mr.start();
+        mediaRecorderRef.current = mr;
+      } catch (mrErr) {
+        mediaRecorderRef.current = null;
+      }
 
       samplesRef.current = [];
       frameCountRef.current = 0;
@@ -150,7 +172,24 @@ export default function PianoTouchAnalyzer() {
     setIsRecording(false);
     cancelAnimationFrame(rafRef.current);
     clearInterval(timerRef.current);
-    if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+
+    const finishStream = () => {
+      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+    };
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.onstop = () => {
+        try {
+          const blob = new Blob(chunksRef.current, { type: mediaRecorderRef.current.mimeType || "audio/webm" });
+          setAudioUrl(URL.createObjectURL(blob));
+        } catch (e) { /* 재생용 오디오 생성 실패는 분석에 영향 없음 */ }
+        finishStream();
+      };
+      mediaRecorderRef.current.stop();
+    } else {
+      finishStream();
+    }
+
     if (audioCtxRef.current) audioCtxRef.current.close();
     setStatus("analyzing");
     setTimeout(() => segment(), 50);
@@ -253,7 +292,9 @@ export default function PianoTouchAnalyzer() {
       return { ...n, durDevPct, volDevPct, durFlag, volFlag, shortFlag, lowConfidenceFlag, jitterFlag, ok };
     });
 
-    setResults({ notes: evaluated, meanDur, meanAmp, maxAmp: Math.max(...amps, 0.001) });
+    const totalDuration = Math.max(...evaluated.map((n) => n.onsetT + n.duration), 0.5);
+    totalDurationRef.current = totalDuration;
+    setResults({ notes: evaluated, meanDur, meanAmp, maxAmp: Math.max(...amps, 0.001), totalDuration });
     setStatus("done");
   };
 
@@ -270,8 +311,32 @@ export default function PianoTouchAnalyzer() {
       cancelAnimationFrame(rafRef.current);
       clearInterval(timerRef.current);
       if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const togglePlay = () => {
+    const el = audioElRef.current;
+    if (!el) return;
+    if (el.paused) { el.play(); } else { el.pause(); }
+  };
+
+  const handleTimeUpdate = () => {
+    const el = audioElRef.current;
+    if (!el) return;
+    const dur = el.duration && isFinite(el.duration) ? el.duration : totalDurationRef.current;
+    setPlayheadRatio(dur > 0 ? el.currentTime / dur : 0);
+  };
+
+  const seekTo = (ratio) => {
+    const el = audioElRef.current;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    setPlayheadRatio(clamped);
+    if (!el) return;
+    const dur = el.duration && isFinite(el.duration) ? el.duration : totalDurationRef.current;
+    el.currentTime = clamped * dur;
+  };
 
   const okCount = results ? results.notes.filter((n) => n.ok).length : 0;
   const totalCount = results ? results.notes.length : 0;
@@ -319,6 +384,33 @@ export default function PianoTouchAnalyzer() {
             {status === "analyzing" && <span style={{ color: "#C9A24D", fontSize: 13 }}>분석 중…</span>}
           </div>
           <canvas ref={canvasMeterRef} width={680} height={10} style={{ width: "100%", height: 10, borderRadius: 5, display: "block" }} />
+          {audioUrl && (
+            <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 12, background: "#211712", borderRadius: 10, padding: "10px 14px" }}>
+              <button onClick={togglePlay} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, borderRadius: "50%", background: "#4C86B5", color: "#11181F", border: "none", flexShrink: 0 }}>
+                {isPlaying ? <Pause size={15} /> : <Play size={15} style={{ marginLeft: 1 }} />}
+              </button>
+              <audio
+                ref={audioElRef}
+                src={audioUrl}
+                style={{ display: "none" }}
+                onTimeUpdate={handleTimeUpdate}
+                onPlay={() => setIsPlaying(true)}
+                onPause={() => setIsPlaying(false)}
+                onEnded={() => setIsPlaying(false)}
+                onLoadedMetadata={(e) => { if (isFinite(e.currentTarget.duration)) totalDurationRef.current = e.currentTarget.duration; }}
+              />
+              <div
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  seekTo((e.clientX - rect.left) / rect.width);
+                }}
+                style={{ flex: 1, height: 6, borderRadius: 3, background: "#3A2B1C", position: "relative", cursor: "pointer" }}
+              >
+                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${playheadRatio * 100}%`, background: "#C9A24D", borderRadius: 3 }} />
+                <div style={{ position: "absolute", left: `${playheadRatio * 100}%`, top: -4, width: 14, height: 14, marginLeft: -7, borderRadius: "50%", background: "#EDE3CB", border: "2px solid #C9A24D" }} />
+              </div>
+            </div>
+          )}
           {errorMsg && (
             <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "flex-start", color: "#E0A398", fontSize: 13 }}>
               <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 1 }} /> {errorMsg}
@@ -342,11 +434,11 @@ export default function PianoTouchAnalyzer() {
 
         {status === "done" && results && (
           <Section title="분석 결과" subtitle={`정상 터치 ${okCount} / ${totalCount}`}>
-            <PianoRoll notes={results.notes} maxAmp={results.maxAmp} />
+            <PianoRoll notes={results.notes} maxAmp={results.maxAmp} totalDuration={results.totalDuration} playheadRatio={audioUrl ? playheadRatio : null} onSeek={audioUrl ? seekTo : null} />
             <div style={{ display: "grid", gap: 18, marginTop: 22 }}>
-              <MiniChart title="음정 흔들림 (cents, 클수록 불안정)" notes={results.notes} valueFn={(n) => n.jitter} okFn={(n) => !n.jitterFlag && !n.lowConfidenceFlag} range={[0, 40]} unit="¢" />
-              <MiniChart title="박자 편차 (평균 대비 %)" notes={results.notes} valueFn={(n) => n.durDevPct} okFn={(n) => !n.durFlag} range={[-100, 100]} unit="%" baseline={0} />
-              <MiniChart title="음량 편차 (평균 대비 %)" notes={results.notes} valueFn={(n) => n.volDevPct} okFn={(n) => !n.volFlag} range={[-100, 100]} unit="%" baseline={0} />
+              <MiniChart title="음정 흔들림 (cents, 클수록 불안정)" notes={results.notes} valueFn={(n) => n.jitter} okFn={(n) => !n.jitterFlag && !n.lowConfidenceFlag} range={[0, 40]} unit="¢" totalDuration={results.totalDuration} playheadRatio={audioUrl ? playheadRatio : null} onSeek={audioUrl ? seekTo : null} />
+              <MiniChart title="박자 편차 (평균 대비 %)" notes={results.notes} valueFn={(n) => n.durDevPct} okFn={(n) => !n.durFlag} range={[-100, 100]} unit="%" baseline={0} totalDuration={results.totalDuration} playheadRatio={audioUrl ? playheadRatio : null} onSeek={audioUrl ? seekTo : null} />
+              <MiniChart title="음량 편차 (평균 대비 %)" notes={results.notes} valueFn={(n) => n.volDevPct} okFn={(n) => !n.volFlag} range={[-100, 100]} unit="%" baseline={0} totalDuration={results.totalDuration} playheadRatio={audioUrl ? playheadRatio : null} onSeek={audioUrl ? seekTo : null} />
             </div>
 
             <div style={{ marginTop: 24, overflowX: "auto" }}>
@@ -384,7 +476,7 @@ export default function PianoTouchAnalyzer() {
           </Section>
         )}
 
-        <button onClick={() => { setResults(null); setStatus("idle"); setErrorMsg(""); rawResultsRef.current = null; }} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#6E5E45", fontSize: 12, marginTop: 30 }}>
+        <button onClick={() => { setResults(null); setStatus("idle"); setErrorMsg(""); rawResultsRef.current = null; if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioUrl(null); setIsPlaying(false); setPlayheadRatio(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#6E5E45", fontSize: 12, marginTop: 30 }}>
           <RotateCcw size={13} /> 초기화
         </button>
       </div>
@@ -414,55 +506,83 @@ function ToleranceRow({ label, value, unit, min, max, step, onChange }) {
   );
 }
 
-// 피아노 롤 스타일 메인 타임라인 (시그니처 비주얼)
-function PianoRoll({ notes, maxAmp }) {
-  const maxDur = Math.max(...notes.map((n) => n.duration), 0.5);
+// 피아노 롤 스타일 메인 타임라인 (시그니처 비주얼) — 실제 시간축에 비례 배치
+function PianoRoll({ notes, maxAmp, totalDuration, playheadRatio, onSeek }) {
+  const dur = totalDuration || Math.max(...notes.map((n) => n.onsetT + n.duration), 0.5);
+  const trackH = 90;
   return (
-    <div style={{ background: "#13100C", borderRadius: 10, padding: "20px 16px", overflowX: "auto" }}>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 8, minHeight: 90 }}>
+    <div style={{ background: "#13100C", borderRadius: 10, padding: "20px 16px" }}>
+      <div
+        onClick={onSeek ? (e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          onSeek((e.clientX - rect.left) / rect.width);
+        } : undefined}
+        style={{ position: "relative", height: trackH, cursor: onSeek ? "pointer" : "default" }}
+      >
         {notes.map((n, i) => {
+          const left = (n.onsetT / dur) * 100;
+          const width = (n.duration / dur) * 100;
           const h = 18 + (n.peakAmp / maxAmp) * 60;
-          const w = Math.max(14, (n.duration / maxDur) * 46);
           return (
-            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-              <div title={`${n.note ? n.note.name + n.note.octave : "?"} · ${n.duration.toFixed(2)}s`}
-                style={{ width: w, height: h, background: n.ok ? "#4C86B5" : "#C1473A", borderRadius: 4, opacity: 0.92 }} />
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#6E5E45" }}>{n.note ? `${n.note.name}${n.note.octave}` : "?"}</span>
-            </div>
+            <div key={i} style={{ position: "absolute", left: `${left}%`, width: `${width}%`, minWidth: 10, bottom: 16, height: h, background: n.ok ? "#4C86B5" : "#C1473A", borderRadius: 4, opacity: 0.92 }}
+              title={`${n.note ? n.note.name + n.note.octave : "?"} · ${n.duration.toFixed(2)}s`} />
           );
         })}
+        {notes.map((n, i) => {
+          const left = (n.onsetT / dur) * 100;
+          return (
+            <span key={`l${i}`} style={{ position: "absolute", left: `${left}%`, bottom: 0, fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#6E5E45", whiteSpace: "nowrap" }}>
+              {n.note ? `${n.note.name}${n.note.octave}` : "?"}
+            </span>
+          );
+        })}
+        {playheadRatio !== null && playheadRatio !== undefined && (
+          <div style={{ position: "absolute", left: `${playheadRatio * 100}%`, top: 0, bottom: 0, width: 2, background: "#C9A24D", boxShadow: "0 0 6px rgba(201,162,77,0.7)" }} />
+        )}
       </div>
       <div style={{ marginTop: 14, display: "flex", gap: 16, fontSize: 11, color: "#A89678" }}>
         <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#4C86B5", borderRadius: 2, marginRight: 5 }} />오차 범위 내</span>
         <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#C1473A", borderRadius: 2, marginRight: 5 }} />오차 범위 초과</span>
+        {onSeek && <span style={{ marginLeft: "auto", color: "#6E5E45" }}>그래프를 탭하면 그 위치로 재생됩니다</span>}
       </div>
     </div>
   );
 }
 
-// 항목별 미니 그래프
-function MiniChart({ title, notes, valueFn, okFn, range, unit, baseline = 0 }) {
+// 항목별 미니 그래프 — 실제 시간축에 맞춰 배치, 재생 위치 표시
+function MiniChart({ title, notes, valueFn, okFn, range, unit, baseline = 0, totalDuration, playheadRatio, onSeek }) {
   const [lo, hi] = range;
   const h = 70;
+  const dur = totalDuration || Math.max(...notes.map((n) => n.onsetT + n.duration), 0.5);
   return (
     <div>
       <div style={{ fontSize: 12.5, color: "#A89678", marginBottom: 6 }}>{title}</div>
       <div style={{ background: "#13100C", borderRadius: 8, padding: "10px 12px", position: "relative" }}>
         <div style={{ position: "absolute", left: 12, right: 12, top: 10 + (1 - (baseline - lo) / (hi - lo)) * h, borderTop: "1px dashed #3A2B1C" }} />
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: h, position: "relative" }}>
+        <div
+          onClick={onSeek ? (e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            onSeek((e.clientX - rect.left) / rect.width);
+          } : undefined}
+          style={{ height: h, position: "relative", cursor: onSeek ? "pointer" : "default" }}
+        >
           {notes.map((n, i) => {
             const v = valueFn(n);
             const ok = okFn(n);
+            const left = (n.onsetT / dur) * 100;
             if (v === null || v === undefined || Number.isNaN(v)) {
-              return <div key={i} style={{ width: 10, height: h, background: "repeating-linear-gradient(45deg,#2E2117,#2E2117 3px,#211712 3px,#211712 6px)", borderRadius: 2 }} title="감지 불가" />;
+              return <div key={i} style={{ position: "absolute", left: `${left}%`, bottom: 0, width: 10, height: h, background: "repeating-linear-gradient(45deg,#2E2117,#2E2117 3px,#211712 3px,#211712 6px)", borderRadius: 2 }} title="감지 불가" />;
             }
             const clamped = Math.max(lo, Math.min(hi, v));
             const ratio = (clamped - lo) / (hi - lo);
             const barH = Math.max(3, ratio * h);
             return (
-              <div key={i} style={{ width: 10, height: barH, background: ok ? "#4C86B5" : "#C1473A", borderRadius: 2 }} title={`${n.note ? n.note.name + n.note.octave : "?"}: ${v.toFixed(1)}${unit}`} />
+              <div key={i} style={{ position: "absolute", left: `${left}%`, bottom: 0, width: 10, height: barH, background: ok ? "#4C86B5" : "#C1473A", borderRadius: 2 }} title={`${n.note ? n.note.name + n.note.octave : "?"}: ${v.toFixed(1)}${unit}`} />
             );
           })}
+          {playheadRatio !== null && playheadRatio !== undefined && (
+            <div style={{ position: "absolute", left: `${playheadRatio * 100}%`, top: 0, bottom: 0, width: 2, background: "#C9A24D", boxShadow: "0 0 6px rgba(201,162,77,0.7)" }} />
+          )}
         </div>
       </div>
     </div>
