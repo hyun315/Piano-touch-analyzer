@@ -19,7 +19,7 @@ function autoCorrelate(buf, sampleRate) {
   let rms = 0;
   for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / SIZE);
-  if (rms < 0.008) return { freq: -1, rms };
+  if (rms < 0.004) return { freq: -1, rms };
 
   let r1 = 0, r2 = SIZE - 1;
   const thres = 0.2;
@@ -204,14 +204,14 @@ export default function PianoTouchAnalyzer() {
       return;
     }
     const maxAmp = Math.max(...samples.map((s) => s.amp));
-    if (maxAmp < 0.01) {
+    if (maxAmp < 0.003) {
       setErrorMsg("소리가 감지되지 않았습니다. 마이크 위치와 볼륨을 확인해 주세요.");
       setStatus("error");
       return;
     }
-    const onThres = maxAmp * 0.12;
-    const offThres = maxAmp * 0.07;
-    const minGap = 0.13;
+    const onThres = maxAmp * 0.08;
+    const offThres = maxAmp * 0.045;
+    const minGap = 0.11;
 
     let onsets = [];
     let sounding = false;
@@ -418,20 +418,6 @@ export default function PianoTouchAnalyzer() {
           )}
         </Section>
 
-        <button onClick={() => setShowSettings((s) => !s)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#A89678", fontSize: 13, padding: "4px 0", marginBottom: 12 }}>
-          {showSettings ? <ChevronUp size={15} /> : <ChevronDown size={15} />} 허용 오차 설정
-        </button>
-        {showSettings && (
-          <div style={{ background: "#211712", borderRadius: 10, padding: 14, marginBottom: 24, display: "flex", flexDirection: "column", gap: 12, fontSize: 13 }}>
-            <ToleranceRow label="음정 흔들림 허용" value={jitterTol} unit="cents" min={5} max={50} step={5} onChange={setJitterTol} />
-            <ToleranceRow label="박자(길이) 편차 허용" value={durTolPct} unit="%" min={10} max={80} step={5} onChange={setDurTolPct} />
-            <ToleranceRow label="음량 편차 허용" value={volTolPct} unit="%" min={10} max={80} step={5} onChange={setVolTolPct} />
-            <p style={{ color: "#6E5E45", fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
-              연주 전체의 평균 길이·음량 대비 허용 범위를 벗어나거나, 음정이 흔들리거나(겹침/노이즈), 너무 짧게 끊긴 터치는 자동으로 오차로 표시됩니다.
-            </p>
-          </div>
-        )}
-
         {status === "done" && results && (
           <Section title="분석 결과" subtitle={`정상 터치 ${okCount} / ${totalCount}`}>
             <PianoRoll notes={results.notes} maxAmp={results.maxAmp} totalDuration={results.totalDuration} playheadRatio={audioUrl ? playheadRatio : null} onSeek={audioUrl ? seekTo : null} />
@@ -474,6 +460,20 @@ export default function PianoTouchAnalyzer() {
               </table>
             </div>
           </Section>
+        )}
+
+        <button onClick={() => setShowSettings((s) => !s)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#A89678", fontSize: 13, padding: "4px 0", marginBottom: 12 }}>
+          {showSettings ? <ChevronUp size={15} /> : <ChevronDown size={15} />} 허용 오차 설정
+        </button>
+        {showSettings && (
+          <div style={{ background: "#211712", borderRadius: 10, padding: 14, marginBottom: 24, display: "flex", flexDirection: "column", gap: 12, fontSize: 13 }}>
+            <ToleranceRow label="음정 흔들림 허용" value={jitterTol} unit="cents" min={5} max={50} step={5} onChange={setJitterTol} />
+            <ToleranceRow label="박자(길이) 편차 허용" value={durTolPct} unit="%" min={10} max={80} step={5} onChange={setDurTolPct} />
+            <ToleranceRow label="음량 편차 허용" value={volTolPct} unit="%" min={10} max={80} step={5} onChange={setVolTolPct} />
+            <p style={{ color: "#6E5E45", fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
+              연주 전체의 평균 길이·음량 대비 허용 범위를 벗어나거나, 음정이 흔들리거나(겹침/노이즈), 너무 짧게 끊긴 터치는 자동으로 오차로 표시됩니다.
+            </p>
+          </div>
         )}
 
         <button onClick={() => { setResults(null); setStatus("idle"); setErrorMsg(""); rawResultsRef.current = null; if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioUrl(null); setIsPlaying(false); setPlayheadRatio(0); }} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#6E5E45", fontSize: 12, marginTop: 30 }}>
