@@ -86,7 +86,15 @@ export default function PianoTouchAnalyzer() {
   const audioElRef = useRef(null);
   const totalDurationRef = useRef(1);
 
+  const sessionIdRef = useRef(0); // 세션 ID로 오래된 RAF 콜백 무시
+
   const startRecording = async () => {
+    // 이전 세션 완전 종료
+    cancelAnimationFrame(rafRef.current);
+    clearInterval(timerRef.current);
+    sessionIdRef.current += 1;
+    const mySession = sessionIdRef.current;
+
     setErrorMsg("");
     setResults(null);
     if (audioUrl) URL.revokeObjectURL(audioUrl);
@@ -95,6 +103,8 @@ export default function PianoTouchAnalyzer() {
     setPlayheadRatio(0);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      // 이미 다른 세션이 시작됐으면 중단
+      if (sessionIdRef.current !== mySession) { stream.getTracks().forEach(t => t.stop()); return; }
       streamRef.current = stream;
       const Ctx = window.AudioContext || window.webkitAudioContext;
       const ctx = new Ctx();
@@ -116,6 +126,60 @@ export default function PianoTouchAnalyzer() {
       }
 
       samplesRef.current = [];
+      frameCountRef.current = 0;
+      lastFreqRef.current = -1;
+      startTimeRef.current = ctx.currentTime;
+      setIsRecording(true);
+      setStatus("recording");
+      setElapsed(0);
+
+      timerRef.current = setInterval(() => {
+        setElapsed(Number((ctx.currentTime - startTimeRef.current).toFixed(1)));
+      }, 100);
+
+      const buf = new Float32Array(analyser.fftSize);
+      const draw = () => {
+        // 세션이 바뀌었으면(정지됐으면) 즉시 종료
+        if (sessionIdRef.current !== mySession) return;
+
+        analyser.getFloatTimeDomainData(buf);
+        let sumSq = 0;
+        for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
+        const rms = Math.sqrt(sumSq / buf.length);
+
+        frameCountRef.current++;
+        let freq = lastFreqRef.current;
+        if (frameCountRef.current % 3 === 0 || rms > 0.02) {
+          const r = autoCorrelate(buf, ctx.sampleRate);
+          freq = r.freq;
+          lastFreqRef.current = freq;
+        }
+        const t = ctx.currentTime - startTimeRef.current;
+        samplesRef.current.push({ t, amp: rms, freq });
+
+        const canvas = canvasMeterRef.current;
+        if (canvas) {
+          const cctx = canvas.getContext("2d");
+          const w = canvas.width, h = canvas.height;
+          cctx.fillStyle = "#2E2117";
+          cctx.fillRect(0, 0, w, h);
+          const level = Math.min(1, rms * 6);
+          const barW = level * w;
+          const grad = cctx.createLinearGradient(0, 0, w, 0);
+          grad.addColorStop(0, "#4C86B5");
+          grad.addColorStop(0.7, "#C9A24D");
+          grad.addColorStop(1, "#C1473A");
+          cctx.fillStyle = grad;
+          cctx.fillRect(0, 0, barW, h);
+        }
+        rafRef.current = requestAnimationFrame(draw);
+      };
+      rafRef.current = requestAnimationFrame(draw);
+    } catch (e) {
+      setErrorMsg("마이크에 접근할 수 없습니다. 브라우저 권한을 확인해 주세요.");
+      setStatus("error");
+    }
+  };
       frameCountRef.current = 0;
       lastFreqRef.current = -1;
       startTimeRef.current = ctx.currentTime;
@@ -172,6 +236,8 @@ export default function PianoTouchAnalyzer() {
     setIsRecording(false);
     cancelAnimationFrame(rafRef.current);
     clearInterval(timerRef.current);
+    // 세션 ID 올려서 혹시 남은 RAF 콜백도 무시되게 함
+    sessionIdRef.current += 1;
 
     const finishStream = () => {
       if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
@@ -198,7 +264,8 @@ export default function PianoTouchAnalyzer() {
       if (audioCtxRef.current && audioCtxRef.current.state !== "closed") audioCtxRef.current.close();
     } catch (e) { /* 이미 닫힌 컨텍스트는 무시 */ }
     setStatus("analyzing");
-    setTimeout(() => segment(), 50);
+    // RAF가 완전히 멈추고 마지막 샘플까지 배열에 들어올 시간 확보 (50→150ms)
+    setTimeout(() => segment(), 150);
   };
 
   // 녹음에서 음을 분리해 원시 노트 데이터 생성 (기준 악보 없이)
